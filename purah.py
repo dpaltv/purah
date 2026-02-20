@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 DEFAULT_INPUT = os.path.expanduser("~/input")
 DEFAULT_OUTPUT = os.path.expanduser("/output") # Remote Offload Target
 DEFAULT_LM_URL = "http://localhost:1234/v1/chat/completions"
-DEFAULT_LM_MODEL = "qwen3-coder-30b"
+DEFAULT_LM_MODEL = "gpt-oss-20b"
 
 # CONSTANTS
 WHISPER_PATH = "/opt/homebrew/bin/whisper-cli"
