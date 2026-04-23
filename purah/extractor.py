@@ -27,6 +27,13 @@ class Extractor:
         self.buffer_seconds = buffer_seconds or config.BUFFER_SECONDS
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def sanitize_filename(self, name: str) -> str:
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            name = name.replace(char, "_")
+        name = name[:100]
+        return name.strip("_")
+
     def get_duration(self, video_path: Path) -> float:
         cmd = [
             "ffprobe",
@@ -61,8 +68,8 @@ class Extractor:
         
         duration = buffer_end - buffer_start
         
-        safe_category = sanitize_filename(category)
-        safe_name = sanitize_filename(output_name)
+        safe_category = self.sanitize_filename(category)
+        safe_name = self.sanitize_filename(output_name)
         
         timestamp_str = f"{int(start_seconds // 3600):02d}{int((start_seconds % 3600) // 60):02d}{int(start_seconds % 60):02d}"
         
@@ -70,14 +77,14 @@ class Extractor:
         output_path = self.output_dir / output_filename
 
         cmd = [
-            "ffmpeg",
+            config.FFMPEG_PATH,
             "-y",
             "-ss", str(buffer_start),
             "-i", str(video_path),
             "-t", str(duration),
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "-preset", "slow",
+            "-crf", "16",
             "-c:a", "aac",
             "-b:a", "128k",
             str(output_path),

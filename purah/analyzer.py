@@ -357,3 +357,169 @@ Respond ONLY with JSON array, no other text:"""
         if isinstance(value, str):
             return parse_timestamp(value)
         return None
+
+
+class ChapterExtractor:
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_retries: int = 3,
+    ):
+        self.base_url = base_url or config.LM_STUDIO_BASE_URL
+        self.api_key = api_key or config.LM_STUDIO_API_KEY
+        self.model = model or config.LM_STUDIO_MODEL
+        self.temperature = temperature
+        self.max_retries = max_retries
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        })
+
+    def _build_prompt(self, transcript_text: str, video_duration: float) -> str:
+        return f"""You are analyzing a Twitch stream transcript to identify chapter markers for YouTube videos.
+
+The transcript contains timestamps showing when each segment was spoken.
+
+For each chapter, identify:
+- timestamp: When the chapter/topic starts (HH:MM:SS format from the beginning of the video)
+- title: A short, descriptive chapter title (max 60 characters)
+
+IMPORTANT:
+1. Return chapters at natural topic boundaries (typically every 3-10 minutes)
+2. The FIRST chapter MUST start at 00:00:00
+3. Chapters should represent meaningful topic changes, not just time intervals
+4. Topic chapter titles should lead with the keyword and be concise (e.g., "Python Setup" not "Setting up Python")
+5. Identify stream breaks (going on break, stepping away, etc.) and title them "Break". The chapter timestamp should cover the quiet period (silence/absent speech), not the pre-chat or post-chat.
+6. When naming chapters, prioritize using these common keywords from the codebase being worked on:
+
+Codebase context (lift-bro - Kotlin Multiplatform lift tracking app):
+- Screen names: LiftDetailsScreen, DashboardScreen, WorkoutScreen, EditSetScreen, VariationDetailsScreen, EditLiftScreen, HomeScreen, GoalsScreen, TimerScreen, SettingsScreen, WorkoutCalendarScreen, WrappedScreen, OnboardingScreen
+- Domain terms: Exercise, Lift, Workout, Variation, Set, Goal, Settings, Metric, UOM, ThemeMode, CelebrationType, Filter
+- Features: Calendar, Timer, Wrapped analytics, Onboarding, Backup, Server sync
+
+Transcript to analyze (timestamps in brackets like [00:15:30]):
+{transcript_text}
+
+Respond ONLY with JSON array, no other text:"""
+
+    def extract_chapters(self, transcript_data: dict, video_path: Path) -> dict:
+        video_duration = transcript_data.get("transcription", {}).get("duration", 0)
+        transcript_text = self._extract_text_from_transcript(transcript_data)
+
+        prompt = self._build_prompt(transcript_text, video_duration)
+
+        messages = [
+            {"role": "system", "content": "You are an expert video editor specializing in identifying chapter markers for YouTube videos. Always respond with valid JSON."},
+            {"role": "user", "content": prompt},
+        ]
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": 4096,
+        }
+
+        try:
+            response = self._session.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                timeout=None,
+            )
+
+            if response.status_code != 200:
+                logger.error(f"Chapter extraction failed: {response.status_code} - {response.text}")
+                return {"source_video": str(video_path), "chapters": [], "error": response.text}
+
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+
+            chapters = self._parse_chapters_response(content, video_duration)
+
+            result = {
+                "source_video": str(video_path),
+                "duration_seconds": video_duration,
+                "chapters": chapters,
+            }
+
+            logger.info(f"Chapter extraction complete: found {len(chapters)} chapters")
+            return result
+
+        except Exception as e:
+            logger.error(f"Chapter extraction failed: {e}")
+            return {"source_video": str(video_path), "chapters": [], "error": str(e)}
+
+    def _extract_text_from_transcript(self, transcript_data: dict) -> str:
+        segments = transcript_data.get("transcription", {}).get("segments", [])
+        formatted = []
+        for seg in segments:
+            start = seg.get("start", 0)
+            text = seg.get("text", "").strip()
+            if text:
+                formatted.append(f"[{format_timestamp(start)}] {text}")
+        return " ".join(formatted)
+
+    def _parse_chapters_response(self, content: str, video_duration: float) -> list:
+        content = content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        try:
+            chapters = json.loads(content)
+        except json.JSONDecodeError:
+            json_match = re.search(r'\[[\s\S]*\]', content)
+            if json_match:
+                chapters = json.loads(json_match.group())
+            else:
+                logger.error(f"Failed to parse chapters as JSON: {content[:500]}")
+                return []
+
+        if not isinstance(chapters, list):
+            return []
+
+        valid_chapters = []
+        seen_timestamps = set()
+
+        for chapter in chapters:
+            if not isinstance(chapter, dict):
+                continue
+
+            ts = chapter.get("timestamp")
+            title = chapter.get("title", "Untitled")
+
+            if ts is None:
+                continue
+
+            seconds = parse_timestamp(ts)
+            if seconds > video_duration:
+                continue
+            if seconds in seen_timestamps:
+                continue
+
+            seen_timestamps.add(seconds)
+            valid_chapters.append({
+                "timestamp": ts,
+                "seconds": seconds,
+                "title": title[:60],
+            })
+
+        valid_chapters.sort(key=lambda x: x["seconds"])
+
+        has_first_chapter = any(c["seconds"] == 0 for c in valid_chapters)
+        if not has_first_chapter and valid_chapters:
+            valid_chapters.insert(0, {
+                "timestamp": "00:00:00",
+                "seconds": 0,
+                "title": "Start",
+            })
+
+        return valid_chapters

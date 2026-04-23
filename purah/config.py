@@ -11,9 +11,9 @@ BUFFER_SECONDS = 180
 
 LM_STUDIO_BASE_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234/v1")
 LM_STUDIO_API_KEY = os.environ.get("LM_STUDIO_API_KEY", "lm-studio")
-LM_STUDIO_MODEL = os.environ.get("LM_STUDIO_MODEL", "Phi-3-mini-128k-instruct-imatrix-smashed")
+LM_STUDIO_MODEL = os.environ.get("LM_STUDIO_MODEL", "google/gemma-4-e4b")
 
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 
@@ -32,3 +32,10 @@ TRANSCRIPT_WORD_WINDOW = 50
 TRANSCRIPT_CHUNK_MINUTES = 600  # Disable chunking - 10 hours exceeds 5-hour video
 
 TRANSCRIPT_CHUNK_OVERLAP_MINUTES = 5
+
+SUBTITLE_FONT_NAME = os.environ.get("SUBTITLE_FONT_NAME", "BUNGEE")
+SUBTITLE_FONT_SIZE = int(os.environ.get("SUBTITLE_FONT_SIZE", "20"))
+SUBTITLE_HIGHLIGHT_COLOR = "FFFF00"
+SUBTITLE_DEFAULT_COLOR = "FFFFFF"
+
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg")

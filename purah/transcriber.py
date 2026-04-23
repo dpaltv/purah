@@ -47,7 +47,6 @@ class Transcriber:
             language="en",
             beam_size=5,
             word_timestamps=True,
-            vad_filter=True,
         )
 
         segment_list = []
@@ -56,6 +55,10 @@ class Transcriber:
                 "start": seg.start,
                 "end": seg.end,
                 "text": seg.text.strip(),
+                "words": [
+                    {"word": w.word.strip(), "start": w.start, "end": w.end, "probability": w.probability}
+                    for w in seg.words
+                ] if hasattr(seg, 'words') and seg.words else []
             })
 
         result = {
