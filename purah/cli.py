@@ -146,6 +146,22 @@ def run(file, output_dir, no_burn):
 
     console.print(f"[bold green]Extracted:[/bold green] {result['count']} segments")
 
+    console.print("Extracting chapters...")
+    chapters_path = pipeline.extract_chapters(video_path)
+
+    with open(chapters_path, "r") as f:
+        chapters_data = json.load(f)
+
+    chapters_list = chapters_data.get("chapters", [])
+    chapters_txt_path = video_path.with_suffix(".chapters.txt")
+    with open(chapters_txt_path, "w") as f:
+        for ch in chapters_list:
+            ts = ch.get("timestamp", "00:00:00")
+            title = ch.get("title", "Untitled")
+            f.write(f"{ts} {title}\n")
+
+    console.print(f"[bold cyan]Chapters:[/bold cyan] {len(chapters_list)} (saved to {chapters_txt_path.name})")
+
     if not no_burn:
         console.print("Generating subtitles...")
         result = pipeline.extract_with_subtitles(video_path, burn_format="ass")

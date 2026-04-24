@@ -144,69 +144,59 @@ Respond ONLY with JSON array, no other text:"""
     def analyze(self, transcript_data: dict, video_path: Path) -> dict:
         video_duration = transcript_data.get("transcription", {}).get("duration", 0)
         
-        chunks = self._split_into_chunks(transcript_data, video_duration)
+        transcript_text = self._extract_text_from_transcript(transcript_data)
         
-        all_segments = []
+        if not transcript_text.strip():
+            logger.warning("No transcript text found")
+            return {"source_video": str(video_path), "duration_seconds": video_duration, "segments": []}
         
-        for i, chunk in enumerate(chunks):
-            logger.info(f"Analyzing chunk {i+1}/{len(chunks)} ({(chunk['start_seconds']/60):.0f}min - {(chunk['end_seconds']/60):.0f}min)...")
-            
-            if not chunk["text"].strip():
-                logger.info(f"Chunk {i+1} has no text, skipping")
-                continue
-            
-            chunk_prompt = self._build_prompt(chunk["text"])
-            
-            messages = [
-                {"role": "system", "content": "You are an expert video editor specializing in finding engaging content for YouTube Shorts. Always respond with valid JSON."},
-                {"role": "user", "content": chunk_prompt},
-            ]
-            
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": self.temperature,
-                "max_tokens": 8192,
-            }
-            
-            try:
-                response = self._session.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    timeout=None,
-                )
-                
-                if response.status_code != 200:
-                    logger.warning(f"Chunk {i+1} request failed: {response.status_code} - {response.text}")
-                    continue
-                
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                
-                chunk_segments = self._parse_llm_response(
-                    content,
-                    transcript_data,
-                    video_duration,
-                    chunk_start_offset=chunk["start_seconds"],
-                )
-                
-                all_segments.extend(chunk_segments)
-                logger.info(f"Chunk {i+1}: found {len(chunk_segments)} segments")
-                
-            except Exception as e:
-                logger.warning(f"Chunk {i+1} analysis failed: {e}")
-                continue
+        logger.info(f"Analyzing full transcript ({(video_duration/60):.0f} minutes)...")
         
-        all_segments = self._deduplicate_segments(all_segments)
+        chunk_prompt = self._build_prompt(transcript_text)
         
-        result = {
+        messages = [
+            {"role": "system", "content": "You are an expert video editor specializing in finding engaging content for YouTube Shorts. Always respond with valid JSON."},
+            {"role": "user", "content": chunk_prompt},
+        ]
+        
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": 16384,
+        }
+        
+        try:
+            response = self._session.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                timeout=None,
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Request failed: {response.status_code} - {response.text}")
+                return {"source_video": str(video_path), "duration_seconds": video_duration, "segments": []}
+            
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            
+            all_segments = self._parse_llm_response(
+                content,
+                transcript_data,
+                video_duration,
+            )
+            
+            logger.info(f"Analysis complete: found {len(all_segments)} potential shorts")
+            
+        except Exception as e:
+            logger.error(f"Analysis failed: {e}")
+            return {"source_video": str(video_path), "duration_seconds": video_duration, "segments": []}
+        
+        return {
             "source_video": str(video_path),
             "duration_seconds": video_duration,
             "segments": all_segments,
         }
-        
-        logger.info(f"Analysis complete: found {len(all_segments)} potential shorts across {len(chunks)} chunks")
-        return result
 
     def _split_into_chunks(self, transcript_data: dict, video_duration: float) -> list:
         chunk_duration = config.TRANSCRIPT_CHUNK_MINUTES * 60
@@ -421,7 +411,7 @@ Respond ONLY with JSON array, no other text:"""
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": 4096,
+            "max_tokens": 16384,
         }
 
         try:
