@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -17,10 +19,12 @@ class Pipeline:
         self,
         watch_folder: Optional[Path] = None,
         output_folder: Optional[Path] = None,
+        video_name: Optional[str] = None,
     ):
-        self.watch_folder = watch_folder or config.DEFAULT_WATCH_FOLDER
-        self.output_folder = output_folder or config.DEFAULT_OUTPUT_FOLDER
-        
+        self.watch_folder = Path(watch_folder) if watch_folder else config.DEFAULT_WATCH_FOLDER
+        self.output_folder = Path(output_folder) if output_folder else config.DEFAULT_OUTPUT_FOLDER
+        self.video_name = video_name
+
         self.transcriber = Transcriber()
         self.analyzer = Analyzer()
         self.chapter_extractor = ChapterExtractor()
@@ -289,6 +293,273 @@ class Pipeline:
             f"{len(burned_videos)} with burned subtitles"
         )
         return result
+
+
+    def _get_output_base(self, video_path: Path) -> Path:
+        if self.video_name:
+            return self.output_folder / self.video_name
+        return self.output_folder / video_path.stem
+
+    @staticmethod
+    def _normalize_word(word: str) -> str:
+        return word.lower().strip(".,!?;:'\"-–—()[]{}<>")
+
+    def find_mentions(
+        self,
+        video_path: Path,
+        phrases: list,
+        buffer_seconds: float = 0.5,
+        group_window: float = 0.5,
+        burn_counts: bool = False,
+    ) -> dict:
+        video_path = Path(video_path).resolve()
+
+        transcript_path = video_path.with_suffix(".transcript.json")
+        if transcript_path.exists():
+            logger.info(f"Loading existing transcript: {transcript_path}")
+            with open(transcript_path, "r") as f:
+                transcript_data = json.load(f)
+        else:
+            logger.info("Transcribing video...")
+            transcript_data = self.transcriber.transcribe(video_path, transcript_path)
+
+        video_duration = transcript_data.get("transcription", {}).get("duration", 0)
+
+        all_words = []
+        segments = transcript_data.get("transcription", {}).get("segments", [])
+        for seg in segments:
+            all_words.extend(seg.get("words", []))
+
+        if not all_words:
+            return {
+                "video": str(video_path),
+                "duration_seconds": video_duration,
+                "total_mentions": 0,
+                "groups": [],
+                "clips": [],
+            }
+
+        mentions = []
+
+        for phrase in phrases:
+            phrase_lower = phrase.lower().strip()
+            phrase_words = phrase_lower.split()
+
+            if len(phrase_words) == 1:
+                for word in all_words:
+                    word_text = word.get("word", "").strip()
+                    if re.search(rf'\b{re.escape(phrase_lower)}\b', word_text.lower()):
+                        mentions.append({
+                            "word": word_text,
+                            "start": word["start"],
+                            "end": word["end"],
+                            "probability": word.get("probability", 0),
+                            "phrase": phrase,
+                        })
+            else:
+                n = len(phrase_words)
+                i = 0
+                while i < len(all_words) - n + 1:
+                    match = True
+                    for j in range(n):
+                        w = self._normalize_word(all_words[i + j].get("word", ""))
+                        if w != phrase_words[j]:
+                            match = False
+                            break
+                    if match:
+                        mentions.append({
+                            "word": " ".join(
+                                all_words[i + k].get("word", "") for k in range(n)
+                            ),
+                            "start": all_words[i]["start"],
+                            "end": all_words[i + n - 1]["end"],
+                            "probability": min(
+                                all_words[i + k].get("probability", 1) for k in range(n)
+                            ),
+                            "phrase": phrase,
+                        })
+                        i += n
+                    else:
+                        i += 1
+
+        mentions.sort(key=lambda m: m["start"])
+
+        logger.info(
+            f"Found {len(mentions)} mention(s) in transcript for phrases: {phrases}"
+        )
+
+        if not mentions:
+            return {
+                "video": str(video_path),
+                "duration_seconds": video_duration,
+                "total_mentions": 0,
+                "groups": [],
+                "clips": [],
+            }
+
+        groups = []
+        current_group = [mentions[0]]
+
+        for mention in mentions[1:]:
+            gap = mention["start"] - current_group[-1]["end"]
+            if gap <= group_window:
+                current_group.append(mention)
+            else:
+                groups.append(current_group)
+                current_group = [mention]
+
+        if current_group:
+            groups.append(current_group)
+
+        output_dir = self._get_output_base(video_path) / "mentions"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        clips = []
+        group_data = []
+
+        for i, group in enumerate(groups, 1):
+            group_start = group[0]["start"]
+            group_end = group[-1]["end"]
+
+            clip_start = max(0, group_start - buffer_seconds)
+            clip_end = min(video_duration, group_end + buffer_seconds)
+            duration = clip_end - clip_start
+
+            unique_phrases = sorted(set(m["phrase"] for m in group))
+            phrase_label = "_".join(p.lower().replace(" ", "_") for p in unique_phrases)
+            output_name = f"mention_{i:03d}_{phrase_label}"
+            output_path = output_dir / f"{output_name}.mp4"
+
+            cmd = [
+                config.FFMPEG_PATH,
+                "-y",
+                "-ss", str(clip_start),
+                "-i", str(video_path),
+                "-t", str(duration),
+            ]
+
+            if burn_counts and config.BUNGEE_FONT_PATH:
+                cmd += [
+                    "-vf", (
+                        f"drawtext=text='{i}':"
+                        f"fontfile={config.BUNGEE_FONT_PATH}:"
+                        f"fontsize=120:"
+                        f"fontcolor=white:"
+                        f"borderw=4:"
+                        f"bordercolor=black:"
+                        f"x=w-tw-40:"
+                        f"y=40"
+                    ),
+                ]
+
+            cmd += [
+                "-c:v", "libx264",
+                "-preset", "slow",
+                "-crf", "16",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                str(output_path),
+            ]
+
+            logger.info(
+                f"Extracting mention group {i}: "
+                f"{clip_start:.1f}s - {clip_end:.1f}s "
+                f"(duration: {duration:.1f}s, {len(group)} mention(s), "
+                f"phrases: {unique_phrases})"
+            )
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"FFmpeg failed for group {i}: {result.stderr}")
+                continue
+
+            clips.append(str(output_path))
+
+            group_data.append({
+                "group": i,
+                "clip": str(output_path),
+                "clip_start": clip_start,
+                "clip_end": clip_end,
+                "duration": duration,
+                "mention_count": len(group),
+                "phrases": unique_phrases,
+                "mentions": [
+                    {
+                        "word": m["word"],
+                        "start": m["start"],
+                        "end": m["end"],
+                        "phrase": m["phrase"],
+                    }
+                    for m in group
+                ],
+            })
+
+        compilation_path = None
+        if len(clips) > 1:
+            concat_file = output_dir / "concat.txt"
+            with open(concat_file, "w") as f:
+                for clip in clips:
+                    f.write(f"file '{Path(clip).resolve()}'\n")
+
+            compilation_path = str(output_dir / "mentions_compilation.mp4")
+            cmd = [
+                config.FFMPEG_PATH,
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-c:v", "libx264",
+                "-preset", "slow",
+                "-crf", "16",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                compilation_path,
+            ]
+
+            logger.info("Stitching all clips into compilation...")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"Compilation failed: {result.stderr}")
+                compilation_path = None
+            else:
+                concat_file.unlink()
+
+        metadata = {
+            "source_video": str(video_path),
+            "duration_seconds": video_duration,
+            "buffer_seconds": buffer_seconds,
+            "group_window_seconds": group_window,
+            "phrases": phrases,
+            "total_mentions": len(mentions),
+            "groups": group_data,
+            "compilation": compilation_path,
+        }
+
+        metadata_path = output_dir / "mentions.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(
+            f"Extracted {len(clips)} clip(s) "
+            f"from {len(mentions)} mention(s) in {len(groups)} group(s)"
+        )
+
+        return metadata
+
+    def find_ai_mentions(
+        self,
+        video_path: Path,
+        buffer_seconds: float = 0.5,
+        group_window: float = 0.5,
+        burn_counts: bool = False,
+    ) -> dict:
+        return self.find_mentions(
+            video_path,
+            phrases=["AI"],
+            buffer_seconds=buffer_seconds,
+            group_window=group_window,
+            burn_counts=burn_counts,
+        )
 
 
 def create_pipeline(

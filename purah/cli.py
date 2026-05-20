@@ -1,5 +1,6 @@
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -44,14 +45,16 @@ def watch(folder, output_dir, no_burn):
 
     console.print(f"[bold cyan]purah[/bold cyan] - Twitch Stream Shorts Extractor")
     console.print(f"Watching: [yellow]{watch_folder}[/yellow]")
-    console.print(f"Output:   [yellow]{output_folder / 'shorts'}[/yellow]")
+    console.print(f"Output:   [yellow]{output_folder}[/yellow]")
     console.print()
-
-    pipeline = Pipeline(output_folder=output_folder)
 
     def process_video(video_path: Path):
         console.print(f"\n[bold green]Processing:[/bold green] {video_path.name}")
+        video_name = video_path.stem
+
         try:
+            pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
+
             result = pipeline.process_video(video_path)
             console.print(f"[bold green]Extracted:[/bold green] {result['count']} segments")
 
@@ -67,6 +70,10 @@ def watch(folder, output_dir, no_burn):
                     console.print(f"[bold cyan]Subtitles:[/bold cyan] {len(result['subtitles'])} files")
                 if result.get("burned_videos"):
                     console.print(f"[bold green]Burned:[/bold green] {len(result['burned_videos'])} videos")
+
+            output_dir = output_folder / video_name
+            shutil.copy2(video_path, output_dir / video_path.name)
+            console.print(f"[bold cyan]Copied original to:[/bold cyan] {output_dir / video_path.name}")
 
             console.print(f"[bold green]Done![/bold green] Processed {video_path.name}")
         except Exception as e:
@@ -89,10 +96,11 @@ def watch(folder, output_dir, no_burn):
 def transcribe(file, output_dir):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"Transcribing: {video_path.name}")
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     transcript_path = pipeline.transcribe_only(video_path)
 
     console.print(f"[bold green]Transcript saved to:[/bold green] {transcript_path}")
@@ -104,10 +112,11 @@ def transcribe(file, output_dir):
 def analyze(file, output_dir):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"Analyzing: {video_path.name}")
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     segments_path = pipeline.analyze_only(video_path)
 
     console.print(f"[bold green]Analysis saved to:[/bold green] {segments_path}")
@@ -119,10 +128,11 @@ def analyze(file, output_dir):
 def extract(file, output_dir):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"Extracting segments from: {video_path.name}")
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     extracted = pipeline.extract_only(video_path)
 
     console.print(f"[bold green]Extracted {len(extracted)} segments:[/bold green]")
@@ -133,15 +143,150 @@ def extract(file, output_dir):
 @main.command()
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--output-dir", "-o", type=click.Path(), help="Output directory")
+@click.option("--buffer", "-b", default=0.5, show_default=True, type=float, help="Seconds of context before/after each mention")
+@click.option("--window", "-w", default=0.5, show_default=True, type=float, help="Max gap (seconds) to group nearby mentions")
+@click.option("--burn-counts", is_flag=True, help="Burn clip number into top corner using Bungee font")
+def ai(file, output_dir, buffer, window, burn_counts):
+    video_path = Path(file)
+    output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
+
+    console.print(f"[bold cyan]Finding AI mentions in:[/bold cyan] {video_path.name}")
+
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
+    result = pipeline.find_ai_mentions(
+        video_path,
+        buffer_seconds=buffer,
+        group_window=window,
+        burn_counts=burn_counts,
+    )
+
+    if result["total_mentions"] == 0:
+        console.print("[yellow]No AI mentions found in this video.[/yellow]")
+        return
+
+    console.print(f"\n[bold green]Found {result['total_mentions']} AI mention(s)[/bold green]")
+    console.print(f"Grouped into [bold]{len(result['groups'])}[/bold] clip(s)")
+
+    for g in result["groups"]:
+        mention_words = ", ".join(
+            f'"{m["word"]}" at {m["start"]:.1f}s' for m in g["mentions"]
+        )
+        console.print(f"  [cyan]Clip {g['group']}:[/cyan] {Path(g['clip']).name}")
+        console.print(f"         Duration: {g['duration']:.1f}s, Mentions: {mention_words}")
+
+    if result.get("compilation"):
+        console.print(f"\n[bold green]Compilation:[/bold green] {Path(result['compilation']).name}")
+
+    console.print(f"\n[bold green]Done![/bold green] Clips saved to: {Path(result['groups'][0]['clip']).parent}")
+
+
+@main.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--output-dir", "-o", type=click.Path(), help="Output directory")
+@click.option("--phrase", "-p", "phrases", multiple=True, required=True,
+              help="Phrase to search for (can be specified multiple times)")
+@click.option("--buffer", "-b", default=0.5, show_default=True, type=float,
+              help="Seconds of context before/after each mention")
+@click.option("--window", "-w", default=0.5, show_default=True, type=float,
+              help="Max gap (seconds) to group nearby mentions")
+@click.option("--burn-counts", is_flag=True,
+              help="Burn clip number into top corner using Bungee font")
+def find(file, output_dir, phrases, buffer, window, burn_counts):
+    """Find mentions of specific phrases in the transcript."""
+    video_path = Path(file)
+    output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
+
+    console.print(f"[bold cyan]Finding mentions in:[/bold cyan] {video_path.name}")
+    console.print(f"Phrases: [yellow]{', '.join(phrases)}[/yellow]")
+
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
+    result = pipeline.find_mentions(
+        video_path,
+        phrases=list(phrases),
+        buffer_seconds=buffer,
+        group_window=window,
+        burn_counts=burn_counts,
+    )
+
+    if result["total_mentions"] == 0:
+        console.print("[yellow]No mentions found in this video.[/yellow]")
+        return
+
+    console.print(f"\n[bold green]Found {result['total_mentions']} mention(s)[/bold green]")
+    console.print(f"Grouped into [bold]{len(result['groups'])}[/bold] clip(s)")
+
+    for g in result["groups"]:
+        mention_words = ", ".join(
+            f'"{m["word"]}" ({m["phrase"]}) at {m["start"]:.1f}s'
+            for m in g["mentions"]
+        )
+        console.print(f"  [cyan]Clip {g['group']}:[/cyan] {Path(g['clip']).name}")
+        console.print(f"         Duration: {g['duration']:.1f}s, Mentions: {mention_words}")
+
+    if result.get("compilation"):
+        console.print(f"\n[bold green]Compilation:[/bold green] {Path(result['compilation']).name}")
+
+    console.print(f"\n[bold green]Done![/bold green] Clips saved to: {Path(result['groups'][0]['clip']).parent}")
+
+
+@main.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--output-dir", "-o", type=click.Path(), help="Output directory")
+@click.option("--buffer", "-b", default=0.5, show_default=True, type=float,
+              help="Seconds of context before/after each mention")
+@click.option("--window", "-w", default=0.5, show_default=True, type=float,
+              help="Max gap (seconds) to group nearby mentions")
+@click.option("--burn-counts", is_flag=True,
+              help="Burn clip number into top corner using Bungee font")
+def apple_intelligence(file, output_dir, buffer, window, burn_counts):
+    """Find mentions of 'Apple Intelligence' in the transcript."""
+    video_path = Path(file)
+    output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
+
+    console.print(f"[bold cyan]Finding Apple Intelligence mentions in:[/bold cyan] {video_path.name}")
+
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
+    result = pipeline.find_mentions(
+        video_path,
+        phrases=["Apple Intelligence"],
+        buffer_seconds=buffer,
+        group_window=window,
+        burn_counts=burn_counts,
+    )
+
+    if result["total_mentions"] == 0:
+        console.print("[yellow]No Apple Intelligence mentions found in this video.[/yellow]")
+        return
+
+    console.print(f"\n[bold green]Found {result['total_mentions']} Apple Intelligence mention(s)[/bold green]")
+    console.print(f"Grouped into [bold]{len(result['groups'])}[/bold] clip(s)")
+
+    for g in result["groups"]:
+        console.print(f"  [cyan]Clip {g['group']}:[/cyan] {Path(g['clip']).name}")
+        console.print(f"         Duration: {g['duration']:.1f}s")
+
+    if result.get("compilation"):
+        console.print(f"\n[bold green]Compilation:[/bold green] {Path(result['compilation']).name}")
+
+    console.print(f"\n[bold green]Done![/bold green] Clips saved to: {Path(result['groups'][0]['clip']).parent}")
+
+
+@main.command()
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--output-dir", "-o", type=click.Path(), help="Output directory")
 @click.option("--no-burn", is_flag=True, help="Skip burning subtitles into video")
 def run(file, output_dir, no_burn):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"[bold cyan]Running full pipeline on:[/bold cyan] {video_path.name}")
     console.print()
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     result = pipeline.process_video(video_path)
 
     console.print(f"[bold green]Extracted:[/bold green] {result['count']} segments")
@@ -153,7 +298,7 @@ def run(file, output_dir, no_burn):
         chapters_data = json.load(f)
 
     chapters_list = chapters_data.get("chapters", [])
-    chapters_txt_path = video_path.with_suffix(".chapters.txt")
+    chapters_txt_path = output_folder / video_name / f"{video_name}.chapters.txt"
     with open(chapters_txt_path, "w") as f:
         for ch in chapters_list:
             ts = ch.get("timestamp", "00:00:00")
@@ -170,6 +315,8 @@ def run(file, output_dir, no_burn):
             console.print(f"[bold cyan]Subtitles:[/bold cyan] {len(result['subtitles'])} files")
         if result.get("burned_videos"):
             console.print(f"[bold green]Burned:[/bold green] {len(result['burned_videos'])} videos")
+
+    shutil.copy2(video_path, output_folder / video_name / video_path.name)
 
     console.print(f"[bold green]Done![/bold green]")
 
@@ -207,12 +354,13 @@ def status():
 def subtitles(file, output_dir, subtitle_format, burn):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"Generating subtitles for: {video_path.name}")
     if burn:
         console.print(f"Format: [yellow]{subtitle_format.upper()}[/yellow] (will be burned)")
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     result = pipeline.generate_subtitles(video_path, burn=burn, burn_format=subtitle_format)
 
     console.print("\n[bold green]Generated subtitle files:[/bold green]")
@@ -231,10 +379,11 @@ def subtitles(file, output_dir, subtitle_format, burn):
 def chapters(file, output_dir, output_format):
     video_path = Path(file)
     output_folder = get_output_folder(output_dir)
+    video_name = video_path.stem
 
     console.print(f"Extracting chapters from: {video_path.name}")
 
-    pipeline = Pipeline(output_folder=output_folder)
+    pipeline = Pipeline(output_folder=output_folder, video_name=video_name)
     chapters_path = pipeline.extract_chapters(video_path)
 
     with open(chapters_path, "r") as f:

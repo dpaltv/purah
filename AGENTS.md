@@ -41,6 +41,9 @@ purah analyze <video_file>        # Analyze only
 purah extract <video_file>        # Extract shorts + subtitles + burned videos
 purah subtitles <video_file>       # Generate subtitle files (SRT, VTT, ASS)
 purah chapters <video_file>       # Extract YouTube chapters
+purah ai <video_file>             # Find "AI" mentions with word timestamps
+purah find <video_file> -p "AI" -p "Apple Intelligence"  # Find any phrases in transcript
+purah apple-intelligence <video_file>  # Find "Apple Intelligence" mentions
 purah status
 ```
 
