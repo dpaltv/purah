@@ -35,6 +35,14 @@ TRANSCRIPT_CHUNK_OVERLAP_MINUTES = 5
 
 SUBTITLE_FONT_NAME = os.environ.get("SUBTITLE_FONT_NAME", "BUNGEE")
 SUBTITLE_FONT_SIZE = int(os.environ.get("SUBTITLE_FONT_SIZE", "20"))
+
+BUNGEE_FONT_PATH = os.environ.get("BUNGEE_FONT_PATH")
+if not BUNGEE_FONT_PATH:
+    candidates = [
+        Path.home() / "Library/Fonts/Bungee-Regular.ttf",
+        Path("/Library/Fonts/Bungee-Regular.ttf"),
+    ]
+    BUNGEE_FONT_PATH = next((str(p) for p in candidates if p.exists()), None)
 SUBTITLE_HIGHLIGHT_COLOR = "FFFF00"
 SUBTITLE_DEFAULT_COLOR = "FFFFFF"
 

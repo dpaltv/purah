@@ -248,6 +248,8 @@ class Subtitler:
     ):
         self.output_dir = output_dir or config.DEFAULT_OUTPUT_FOLDER
         self.subtitle_format = subtitle_format
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def generate_subtitle_files(
         self,
@@ -257,12 +259,12 @@ class Subtitler:
     ) -> dict:
         video_path = Path(video_path)
         base_name = video_path.stem
-        
+
         output_files = {}
 
         srt_content = transcript_to_srt(transcript_data, offset)
         if srt_content:
-            srt_path = video_path.with_suffix(".srt")
+            srt_path = self.output_dir / f"{base_name}.srt"
             with open(srt_path, "w", encoding="utf-8") as f:
                 f.write(srt_content)
             output_files["srt"] = srt_path
@@ -270,7 +272,7 @@ class Subtitler:
 
         sbv_content = transcript_to_sbv(transcript_data, offset)
         if sbv_content:
-            sbv_path = video_path.with_suffix(".sbv")
+            sbv_path = self.output_dir / f"{base_name}.sbv"
             with open(sbv_path, "w", encoding="utf-8") as f:
                 f.write(sbv_content)
             output_files["sbv"] = sbv_path
@@ -278,7 +280,7 @@ class Subtitler:
 
         vtt_content = transcript_to_vtt(transcript_data, offset)
         if vtt_content:
-            vtt_path = video_path.with_suffix(".vtt")
+            vtt_path = self.output_dir / f"{base_name}.vtt"
             with open(vtt_path, "w", encoding="utf-8") as f:
                 f.write(vtt_content)
             output_files["vtt"] = vtt_path
@@ -286,7 +288,7 @@ class Subtitler:
 
         ass_content = transcript_to_ass(transcript_data, offset)
         if ass_content:
-            ass_path = video_path.with_suffix(".ass")
+            ass_path = self.output_dir / f"{base_name}.ass"
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
             output_files["ass"] = ass_path
@@ -306,9 +308,13 @@ class Subtitler:
 
         if output_path is None:
             stem = video_path.stem
-            output_path = video_path.parent / f"{stem}_with_subtitles.mp4"
+            if self.output_dir:
+                output_path = self.output_dir / f"{stem}_with_subtitles.mp4"
+            else:
+                output_path = video_path.parent / f"{stem}_with_subtitles.mp4"
 
         output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if subtitle_format == "ass":
             filter_str = f"ass={subtitle_path}"
@@ -408,13 +414,11 @@ class Subtitler:
             transcript_data, start_seconds, end_seconds
         )
 
-        video_path = Path(video_path)
-        
         output_files = {}
-        
+
         srt_content = transcript_to_srt(segment_transcript, 0)
         if srt_content:
-            srt_path = video_path.parent / f"{output_name}.srt"
+            srt_path = self.output_dir / f"{output_name}.srt"
             with open(srt_path, "w", encoding="utf-8") as f:
                 f.write(srt_content)
             output_files["srt"] = srt_path
@@ -422,7 +426,7 @@ class Subtitler:
 
         sbv_content = transcript_to_sbv(segment_transcript, 0)
         if sbv_content:
-            sbv_path = video_path.parent / f"{output_name}.sbv"
+            sbv_path = self.output_dir / f"{output_name}.sbv"
             with open(sbv_path, "w", encoding="utf-8") as f:
                 f.write(sbv_content)
             output_files["sbv"] = sbv_path
@@ -430,7 +434,7 @@ class Subtitler:
 
         vtt_content = transcript_to_vtt(segment_transcript, 0)
         if vtt_content:
-            vtt_path = video_path.parent / f"{output_name}.vtt"
+            vtt_path = self.output_dir / f"{output_name}.vtt"
             with open(vtt_path, "w", encoding="utf-8") as f:
                 f.write(vtt_content)
             output_files["vtt"] = vtt_path
@@ -438,7 +442,7 @@ class Subtitler:
 
         ass_content = transcript_to_ass(segment_transcript, 0)
         if ass_content:
-            ass_path = video_path.parent / f"{output_name}.ass"
+            ass_path = self.output_dir / f"{output_name}.ass"
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
             output_files["ass"] = ass_path
