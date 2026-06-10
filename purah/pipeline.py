@@ -107,21 +107,19 @@ class Pipeline:
         logger.info(f"Pipeline complete! Extracted {len(extracted)} segments")
         return result
 
-    def transcribe_only(self, video_path: Path) -> Path:
+    def transcribe(self, video_path: Path) -> Path:
         video_path = Path(video_path)
         transcript_path = self._get_transcript_path(video_path)
         self.transcriber.transcribe(video_path, transcript_path)
         return transcript_path
 
-    def analyze_only(self, video_path: Path) -> Path:
+    def analyze(self, video_path: Path) -> Path:
         video_path = Path(video_path)
         transcript_path = self._get_transcript_path(video_path)
 
         if not transcript_path.exists():
-            raise FileNotFoundError(
-                f"Transcript not found: {transcript_path}. "
-                "Run 'purah transcribe' first."
-            )
+            logger.info("Transcript not found, transcribing first...")
+            self.transcribe(video_path)
 
         with open(transcript_path, "r") as f:
             transcript_data = json.load(f)
@@ -136,15 +134,13 @@ class Pipeline:
         logger.info(f"Saved segment analysis to: {segments_path}")
         return segments_path
 
-    def extract_only(self, video_path: Path) -> list:
+    def extract(self, video_path: Path) -> list:
         video_path = Path(video_path)
         segments_path = self._get_segments_path(video_path)
 
         if not segments_path.exists():
-            raise FileNotFoundError(
-                f"Segments file not found: {segments_path}. "
-                "Run 'purah analyze' first."
-            )
+            logger.info("Segments not found, analyzing first...")
+            self.analyze(video_path)
 
         with open(segments_path, "r") as f:
             segments_data = json.load(f)
@@ -163,10 +159,8 @@ class Pipeline:
         transcript_path = self._get_transcript_path(video_path)
 
         if not transcript_path.exists():
-            raise FileNotFoundError(
-                f"Transcript not found: {transcript_path}. "
-                "Run 'purah transcribe' first."
-            )
+            logger.info("Transcript not found, transcribing first...")
+            self.transcribe(video_path)
 
         with open(transcript_path, "r") as f:
             transcript_data = json.load(f)
@@ -206,10 +200,8 @@ class Pipeline:
         transcript_path = self._get_transcript_path(video_path)
 
         if not transcript_path.exists():
-            raise FileNotFoundError(
-                f"Transcript not found: {transcript_path}. "
-                "Run 'purah transcribe' first."
-            )
+            logger.info("Transcript not found, transcribing first...")
+            self.transcribe(video_path)
 
         chapters_path = self._get_chapters_path(video_path)
         if chapters_path.exists():
@@ -238,20 +230,16 @@ class Pipeline:
         transcript_path = self._get_transcript_path(video_path)
 
         if not transcript_path.exists():
-            raise FileNotFoundError(
-                f"Transcript not found: {transcript_path}. "
-                "Run 'purah transcribe' first."
-            )
+            logger.info("Transcript not found, transcribing first...")
+            self.transcribe(video_path)
 
         with open(transcript_path, "r") as f:
             transcript_data = json.load(f)
 
         segments_path = self._get_segments_path(video_path)
         if not segments_path.exists():
-            raise FileNotFoundError(
-                f"Segments not found: {segments_path}. "
-                "Run 'purah analyze' first."
-            )
+            logger.info("Segments not found, analyzing first...")
+            self.analyze(video_path)
 
         with open(segments_path, "r") as f:
             segments_data = json.load(f)

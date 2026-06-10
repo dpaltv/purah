@@ -93,7 +93,7 @@ def transcribe(file, output_dir):
     console.print(f"Transcribing: {video_path.name}")
 
     pipeline = Pipeline(output_folder=output_folder)
-    transcript_path = pipeline.transcribe_only(video_path)
+    transcript_path = pipeline.transcribe(video_path)
 
     console.print(f"[bold green]Transcript saved to:[/bold green] {transcript_path}")
 
@@ -108,7 +108,7 @@ def analyze(file, output_dir):
     console.print(f"Analyzing: {video_path.name}")
 
     pipeline = Pipeline(output_folder=output_folder)
-    segments_path = pipeline.analyze_only(video_path)
+    segments_path = pipeline.analyze(video_path)
 
     console.print(f"[bold green]Analysis saved to:[/bold green] {segments_path}")
 
@@ -123,7 +123,7 @@ def extract(file, output_dir):
     console.print(f"Extracting segments from: {video_path.name}")
 
     pipeline = Pipeline(output_folder=output_folder)
-    extracted = pipeline.extract_only(video_path)
+    extracted = pipeline.extract(video_path)
 
     console.print(f"[bold green]Extracted {len(extracted)} segments:[/bold green]")
     for path in extracted:
