@@ -5,8 +5,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from .transcriber import Transcriber
-from .analyzer import Analyzer, ChapterExtractor
+from .analyzer import Analyzer, TopicExtractor, BreaksExtractor, merge_chapters
 from .extractor import Extractor
 from .subtitler import Subtitler
 from . import config
@@ -27,7 +29,8 @@ class Pipeline:
 
         self.transcriber = Transcriber()
         self.analyzer = Analyzer()
-        self.chapter_extractor = ChapterExtractor()
+        self.topic_extractor = TopicExtractor()
+        self.breaks_extractor = BreaksExtractor()
         self.subtitler = Subtitler()
 
     def _get_output_base(self, video_path: Path) -> Path:
@@ -211,14 +214,73 @@ class Pipeline:
         with open(transcript_path, "r") as f:
             transcript_data = json.load(f)
 
-        logger.info("Extracting chapters...")
-        chapters_data = self.chapter_extractor.extract_chapters(transcript_data, video_path)
+        video_duration = transcript_data.get("transcription", {}).get("duration", 0)
+
+        logger.info("Extracting topic chapters and breaks in parallel...")
+
+        topic_result = None
+        breaks_result = None
+        topic_error = None
+        breaks_error = None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            topics_future = executor.submit(
+                self.topic_extractor.extract_chapters, transcript_data, video_path
+            )
+            breaks_future = executor.submit(
+                self.breaks_extractor.extract_breaks, transcript_data, video_path
+            )
+
+            for future in as_completed([topics_future, breaks_future]):
+                try:
+                    result = future.result()
+                    if future == topics_future:
+                        topic_result = result
+                    else:
+                        breaks_result = result
+                except Exception as e:
+                    if future == topics_future:
+                        topic_error = str(e)
+                        logger.error(f"Topic extraction failed: {e}")
+                    else:
+                        breaks_error = str(e)
+                        logger.error(f"Break extraction failed: {e}")
+
+        if topic_error or topic_result is None:
+            logger.error("Topic extraction failed, no chapters to merge")
+            chapters_data = {
+                "source_video": str(video_path),
+                "duration_seconds": video_duration,
+                "suggested_title": None,
+                "chapters": [],
+                "error": topic_error,
+            }
+            chapters_path = self._get_chapters_path(video_path)
+            with open(chapters_path, "w") as f:
+                json.dump(chapters_data, f, indent=2)
+            logger.info(f"Saved chapters (empty) to: {chapters_path}")
+            return chapters_path
+
+        topic_chapters = topic_result.get("chapters", [])
+        break_events = (breaks_result or {}).get("breaks", [])
+
+        logger.info(
+            f"Merging {len(topic_chapters)} topic chapters with {len(break_events)} breaks..."
+        )
+        merged = merge_chapters(topic_chapters, break_events, video_duration)
+
+        chapters_data = {
+            "source_video": str(video_path),
+            "duration_seconds": video_duration,
+            "suggested_title": topic_result.get("suggested_title"),
+            "chapters": merged,
+        }
 
         chapters_path = self._get_chapters_path(video_path)
         with open(chapters_path, "w") as f:
             json.dump(chapters_data, f, indent=2)
 
-        logger.info(f"Saved chapters to: {chapters_path}")
+        logger.info(f"Saved {len(merged)} chapters to: {chapters_path}")
         return chapters_path
 
     def extract_with_subtitles(

@@ -57,6 +57,11 @@ def watch(folder, output_dir, no_burn):
 
             console.print("Extracting chapters...")
             chapters_path = pipeline.extract_chapters(video_path)
+            with open(chapters_path, "r") as f:
+                chapters_data = json.load(f)
+            suggested_title = chapters_data.get("suggested_title")
+            if suggested_title:
+                console.print(f"[bold yellow]Suggested Title:[/bold yellow] {suggested_title}")
             console.print(f"[bold cyan]Chapters:[/bold cyan] {chapters_path}")
 
             if not no_burn:
@@ -152,6 +157,10 @@ def run(file, output_dir, no_burn):
     with open(chapters_path, "r") as f:
         chapters_data = json.load(f)
 
+    suggested_title = chapters_data.get("suggested_title")
+    if suggested_title:
+        console.print(f"[bold yellow]Suggested Title:[/bold yellow] {suggested_title}")
+
     chapters_list = chapters_data.get("chapters", [])
     chapters_txt_path = video_path.with_suffix(".chapters.txt")
     with open(chapters_txt_path, "w") as f:
@@ -241,6 +250,10 @@ def chapters(file, output_dir, output_format):
         chapters_data = json.load(f)
 
     console.print(f"\n[bold green]Chapters saved to:[/bold green] {chapters_path}")
+
+    suggested_title = chapters_data.get("suggested_title")
+    if suggested_title:
+        console.print(f"\n[bold yellow]Suggested Title:[/bold yellow] {suggested_title}")
 
     if output_format == "text":
         console.print("\n[bold cyan]YouTube Chapters:[/bold cyan]")
