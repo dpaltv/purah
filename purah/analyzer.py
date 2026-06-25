@@ -40,6 +40,43 @@ def _get_chunks(video_duration: float) -> list:
     return chunks
 
 
+def _get_chunks_from_breaks(break_events: list, video_duration: float) -> list:
+    """Compute (start, end) chunks using break boundaries as natural split points.
+
+    Each chunk runs from the end of one break to the start of the next,
+    producing clean content sections with no gaps or overlaps.
+    """
+    if not break_events:
+        return [(0, video_duration)]
+    chunks = []
+    prev = 0.0
+    for b in sorted(break_events, key=lambda x: x['start_seconds']):
+        if b['start_seconds'] > prev:
+            chunks.append((prev, b['start_seconds']))
+        prev = b['end_seconds']
+    if prev < video_duration:
+        chunks.append((prev, video_duration))
+    return chunks
+
+
+def _sub_split_chunks(chunks: list, max_seconds: float, overlap_seconds: float) -> list:
+    """Sub-split any chunk that exceeds max_seconds using overlapping windows."""
+    result = []
+    for start, end in chunks:
+        duration = end - start
+        if duration <= max_seconds:
+            result.append((start, end))
+        else:
+            pos = start
+            while pos < end:
+                chunk_end = min(pos + max_seconds, end)
+                result.append((pos, chunk_end))
+                if chunk_end >= end:
+                    break
+                pos = chunk_end - overlap_seconds
+    return result
+
+
 def extract_transcript_window(transcript_data: dict, start_seconds: float = 0, end_seconds: Optional[float] = None) -> str:
     segments = transcript_data.get("transcription", {}).get("segments", [])
     if end_seconds is None:
@@ -137,11 +174,22 @@ class Analyzer:
             logger.error(f"Failed to connect to LM Studio: {e}")
             return False
 
-    def _build_prompt(self, transcript_text: str) -> str:
-        return f"""You are analyzing a Twitch stream transcript to find segments suitable for YouTube Shorts.
+    def _build_prompt(
+        self,
+        transcript_text: str,
+        chunk_start: float = 0,
+        chunk_end: Optional[float] = None,
+        is_first: bool = True,
+    ) -> str:
+        if is_first:
+            header = "You are analyzing a Twitch stream transcript to find segments suitable for YouTube Shorts. This is the BEGINNING of the video."
+        else:
+            header = f"You are analyzing a section of a Twitch stream transcript ({format_timestamp(chunk_start)} to {format_timestamp(chunk_end)}) to find segments suitable for YouTube Shorts."
+
+        return f"""{header}
 
 CRITICAL INSTRUCTIONS:
-1. The transcript below contains timestamps in format "[MM:SS] text" showing WHEN each segment was spoken
+1. The transcript below contains timestamps in format "[HH:MM:SS] text" showing WHEN each segment was spoken
 2. You MUST use ONLY timestamps that appear in the transcript text below
 3. NEVER guess or estimate timestamps - only use timestamps that are explicitly shown
 4. If you cannot find a timestamp in the transcript, do NOT include that segment
@@ -170,18 +218,27 @@ Transcript to analyze (timestamps are in brackets like [00:15:30]):
 
 Respond ONLY with JSON array, no other text:"""
 
-    def analyze(self, transcript_data: dict, video_path: Path) -> dict:
+    def analyze(
+        self,
+        transcript_data: dict,
+        video_path: Path,
+        chunk_start: float = 0,
+        chunk_end: Optional[float] = None,
+    ) -> dict:
         video_duration = transcript_data.get("transcription", {}).get("duration", 0)
-        
-        transcript_text = self._extract_text_from_transcript(transcript_data)
-        
+        if chunk_end is None:
+            chunk_end = video_duration
+
+        transcript_text = extract_transcript_window(transcript_data, chunk_start, chunk_end)
+
         if not transcript_text.strip():
-            logger.warning("No transcript text found")
+            logger.warning("No transcript text found in window")
             return {"source_video": str(video_path), "duration_seconds": video_duration, "segments": []}
-        
-        logger.info(f"Analyzing full transcript ({(video_duration/60):.0f} minutes)...")
-        
-        chunk_prompt = self._build_prompt(transcript_text)
+
+        is_first = (chunk_start == 0)
+        logger.info(f"Analyzing section {format_timestamp(chunk_start)} → {format_timestamp(chunk_end)} ({(chunk_end - chunk_start)/60:.0f} min)...")
+
+        chunk_prompt = self._build_prompt(transcript_text, chunk_start, chunk_end, is_first)
         
         messages = [
             {"role": "system", "content": "You are an expert video editor specializing in finding engaging content for YouTube Shorts. Always respond with valid JSON."},
@@ -226,56 +283,6 @@ Respond ONLY with JSON array, no other text:"""
             "duration_seconds": video_duration,
             "segments": all_segments,
         }
-
-    def _split_into_chunks(self, transcript_data: dict, video_duration: float) -> list:
-        chunk_duration = config.TRANSCRIPT_CHUNK_MINUTES * 60
-        chunk_overlap = config.TRANSCRIPT_CHUNK_OVERLAP_MINUTES * 60
-        chunks = []
-        
-        all_segments = transcript_data.get("transcription", {}).get("segments", [])
-        
-        chunk_start = 0
-        while chunk_start < video_duration:
-            chunk_end = min(chunk_start + chunk_duration, video_duration)
-            
-            chunk_segments = [
-                seg for seg in all_segments
-                if seg.get("start", 0) >= chunk_start and seg.get("end", 0) <= chunk_end
-            ]
-            
-            chunk_text = " ".join(seg.get("text", "").strip() for seg in chunk_segments)
-            
-            chunks.append({
-                "start_seconds": chunk_start,
-                "end_seconds": chunk_end,
-                "text": chunk_text,
-            })
-            
-            chunk_start = chunk_end - chunk_overlap
-            
-            if chunk_start <= chunks[-1]["start_seconds"]:
-                break
-        
-        logger.info(f"Split transcript into {len(chunks)} chunks of {config.TRANSCRIPT_CHUNK_MINUTES} minutes each with {config.TRANSCRIPT_CHUNK_OVERLAP_MINUTES} minutes overlap")
-        return chunks
-
-    def _deduplicate_segments(self, segments: list) -> list:
-        if not segments:
-            return segments
-        
-        seen = set()
-        unique_segments = []
-        
-        for seg in segments:
-            key = (seg.get("start_seconds"), seg.get("end_seconds"))
-            if key not in seen:
-                seen.add(key)
-                unique_segments.append(seg)
-        
-        if len(unique_segments) < len(segments):
-            logger.info(f"Deduplicated {len(segments) - len(unique_segments)} duplicate segments")
-        
-        return unique_segments
 
     def _extract_text_from_transcript(self, transcript_data: dict) -> str:
         segments = transcript_data.get("transcription", {}).get("segments", [])
@@ -485,11 +492,24 @@ Respond ONLY with JSON object with "title" (string in first section) and "chapte
             logger.error(f"Chapter extraction request failed: {e}")
             return None
 
-    def extract_chapters(self, transcript_data: dict, video_path: Path) -> dict:
+    def extract_chapters(self, transcript_data: dict, video_path: Path, breaks: Optional[list] = None) -> dict:
         video_duration = transcript_data.get("transcription", {}).get("duration", 0)
-        chunks = _get_chunks(video_duration)
 
-        logger.info(f"Splitting video into {len(chunks)} chunks of {config.CHAPTER_CHUNK_MINUTES} min each with {config.CHAPTER_CHUNK_OVERLAP_MINUTES} min overlap")
+        if breaks:
+            raw_chunks = _get_chunks_from_breaks(breaks, video_duration)
+            max_secs = config.CHAPTER_CHUNK_MINUTES * 60
+            overlap_secs = config.CHAPTER_CHUNK_OVERLAP_MINUTES * 60
+            chunks = _sub_split_chunks(raw_chunks, max_secs, overlap_secs)
+            logger.info(
+                f"Chunking by {len(breaks)} breaks into {len(chunks)} content sections"
+            )
+        else:
+            chunks = _get_chunks(video_duration)
+            logger.info(
+                f"Fallback: time-based chunking into {len(chunks)} chunks of "
+                f"{config.CHAPTER_CHUNK_MINUTES} min each with "
+                f"{config.CHAPTER_CHUNK_OVERLAP_MINUTES} min overlap"
+            )
 
         all_chapters = []
         suggested_title = None

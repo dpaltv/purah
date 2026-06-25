@@ -5,10 +5,17 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from .transcriber import Transcriber
-from .analyzer import Analyzer, TopicExtractor, BreaksExtractor, merge_chapters
+from .analyzer import (
+    Analyzer,
+    TopicExtractor,
+    BreaksExtractor,
+    merge_chapters,
+    _get_chunks_from_breaks,
+    _sub_split_chunks,
+    format_timestamp,
+)
+from . import config
 from .extractor import Extractor
 from .subtitler import Subtitler
 from . import config
@@ -64,6 +71,50 @@ class Pipeline:
         shorts_dir.mkdir(parents=True, exist_ok=True)
         return shorts_dir
 
+    def _analyze_shorts_with_breaks(self, transcript_data: dict, video_path: Path, segments_path: Path) -> dict:
+        """Analyze transcript for shorts segments, using breaks as chunk boundaries."""
+        video_duration = transcript_data.get("transcription", {}).get("duration", 0)
+
+        logger.info("Detecting stream breaks for shorts chunking...")
+        breaks_result = self.breaks_extractor.extract_breaks(transcript_data, video_path)
+        break_events = (breaks_result or {}).get("breaks", [])
+
+        if break_events:
+            raw_chunks = _get_chunks_from_breaks(break_events, video_duration)
+            max_secs = config.CHAPTER_CHUNK_MINUTES * 60
+            overlap_secs = config.CHAPTER_CHUNK_OVERLAP_MINUTES * 60
+            chunks = _sub_split_chunks(raw_chunks, max_secs, overlap_secs)
+            logger.info(f"Chunking by {len(break_events)} breaks into {len(chunks)} sections")
+        else:
+            chunks = [(0, video_duration)]
+            logger.info("No breaks found, analyzing full transcript")
+
+        all_segments = []
+        for i, (cs, ce) in enumerate(chunks):
+            logger.info(f"  Section {i + 1}/{len(chunks)} ({format_timestamp(cs)} → {format_timestamp(ce)}): analyzing...")
+            result = self.analyzer.analyze(transcript_data, video_path, chunk_start=cs, chunk_end=ce)
+            segments = result.get("segments", [])
+
+            seen = {(s["start_seconds"], s["end_seconds"]) for s in all_segments}
+            new_segments = [s for s in segments if (s["start_seconds"], s["end_seconds"]) not in seen]
+            all_segments.extend(new_segments)
+            logger.info(f"  Section {i + 1}/{len(chunks)}: found {len(new_segments)} new segments")
+
+        all_segments.sort(key=lambda x: x["start_seconds"])
+        for i, seg in enumerate(all_segments):
+            seg["id"] = i + 1
+
+        result = {
+            "source_video": str(video_path),
+            "duration_seconds": video_duration,
+            "segments": all_segments,
+        }
+
+        with open(segments_path, "w") as f:
+            json.dump(result, f, indent=2)
+        logger.info(f"Saved {len(all_segments)} segments to: {segments_path}")
+        return result
+
     def process_video(self, video_path: Path) -> dict:
         video_path = Path(video_path).resolve()
 
@@ -86,11 +137,7 @@ class Pipeline:
                 segments_data = json.load(f)
         else:
             logger.info("Step 2: Analyzing transcript for shorts segments...")
-            segments_data = self.analyzer.analyze(transcript_data, video_path)
-
-            with open(segments_path, "w") as f:
-                json.dump(segments_data, f, indent=2)
-            logger.info(f"Saved segment analysis to: {segments_path}")
+            segments_data = self._analyze_shorts_with_breaks(transcript_data, video_path, segments_path)
 
         self.extractor = Extractor(output_dir=self._get_shorts_dir(video_path))
         self.subtitler = Subtitler(output_dir=self._get_subtitle_dir(video_path))
@@ -127,14 +174,13 @@ class Pipeline:
         with open(transcript_path, "r") as f:
             transcript_data = json.load(f)
 
-        self.subtitler = Subtitler(output_dir=self._get_subtitle_dir(video_path))
-        segments_data = self.analyzer.analyze(transcript_data, video_path)
-
         segments_path = self._get_segments_path(video_path)
-        with open(segments_path, "w") as f:
-            json.dump(segments_data, f, indent=2)
+        if segments_path.exists():
+            logger.info(f"Loading existing segments: {segments_path}")
+            return segments_path
 
-        logger.info(f"Saved segment analysis to: {segments_path}")
+        self.subtitler = Subtitler(output_dir=self._get_subtitle_dir(video_path))
+        self._analyze_shorts_with_breaks(transcript_data, video_path, segments_path)
         return segments_path
 
     def extract(self, video_path: Path) -> list:
@@ -216,44 +262,23 @@ class Pipeline:
 
         video_duration = transcript_data.get("transcription", {}).get("duration", 0)
 
-        logger.info("Extracting topic chapters and breaks in parallel...")
+        logger.info("Step 1: Detecting stream breaks...")
+        breaks_result = self.breaks_extractor.extract_breaks(transcript_data, video_path)
+        break_events = (breaks_result or {}).get("breaks", [])
+        logger.info(f"Found {len(break_events)} stream breaks")
 
-        topic_result = None
-        breaks_result = None
-        topic_error = None
-        breaks_error = None
+        logger.info("Step 2: Extracting topic chapters (using breaks as boundaries)...")
+        topic_result = self.topic_extractor.extract_chapters(
+            transcript_data, video_path, breaks=break_events
+        )
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            topics_future = executor.submit(
-                self.topic_extractor.extract_chapters, transcript_data, video_path
-            )
-            breaks_future = executor.submit(
-                self.breaks_extractor.extract_breaks, transcript_data, video_path
-            )
-
-            for future in as_completed([topics_future, breaks_future]):
-                try:
-                    result = future.result()
-                    if future == topics_future:
-                        topic_result = result
-                    else:
-                        breaks_result = result
-                except Exception as e:
-                    if future == topics_future:
-                        topic_error = str(e)
-                        logger.error(f"Topic extraction failed: {e}")
-                    else:
-                        breaks_error = str(e)
-                        logger.error(f"Break extraction failed: {e}")
-
-        if topic_error or topic_result is None:
+        if topic_result is None:
             logger.error("Topic extraction failed, no chapters to merge")
             chapters_data = {
                 "source_video": str(video_path),
                 "duration_seconds": video_duration,
                 "suggested_title": None,
                 "chapters": [],
-                "error": topic_error,
             }
             chapters_path = self._get_chapters_path(video_path)
             with open(chapters_path, "w") as f:
@@ -262,7 +287,6 @@ class Pipeline:
             return chapters_path
 
         topic_chapters = topic_result.get("chapters", [])
-        break_events = (breaks_result or {}).get("breaks", [])
 
         logger.info(
             f"Merging {len(topic_chapters)} topic chapters with {len(break_events)} breaks..."
